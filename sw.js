@@ -1,57 +1,61 @@
-/* FormulaX sw.js — v10.21 安全版
- * 旧版问题（已修）：cache-first + 预缓存 index.html + 固定缓存名 formulax-v1，
- * 导致 UC 上永远加载第一次访问时的旧版 index.html，任何代码更新都不生效。
- * 新版原则：HTML / 页面导航一律 network-first（断网才用缓存兜底），
- * 其它静态资源网络优先、失败回缓存。换版时旧缓存整体清除。
- */
-const CACHE_NAME = 'formulax-v1021';
+const CACHE_NAME = "formulax-v1";
 
-// 不预缓存 index.html —— 页面必须永远以网络为准，缓存只做断网兜底
+// 需要预缓存的核心文件
+const PRECACHE_URLS = ["./", "./index.html", "./manifest.json"];
 
-self.addEventListener('install', (event) => {
-  // 不做任何预缓存，安装即生效
+// 安装：预缓存核心文件
+self.addEventListener("install", (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => {
+      console.log("[SW] 预缓存核心文件");
+      return cache.addAll(PRECACHE_URLS);
+    })
+  );
+  // 立即激活，不等待旧 SW
   self.skipWaiting();
 });
 
-self.addEventListener('activate', (event) => {
+// 激活：清理旧缓存
+self.addEventListener("activate", (event) => {
   event.waitUntil(
-    caches.keys().then((names) =>
-      Promise.all(
-        names.filter((n) => n !== CACHE_NAME).map((n) => caches.delete(n))
+    caches
+      .keys()
+      .then((names) =>
+        Promise.all(
+          names.filter((n) => n !== CACHE_NAME).map((n) => caches.delete(n))
+        )
       )
-    )
   );
   self.clients.claim();
 });
 
-self.addEventListener('fetch', (event) => {
-  if (event.request.method !== 'GET') return;
+// 请求拦截：缓存优先，网络回退
+self.addEventListener("fetch", (event) => {
+  // 跳过非 GET 请求
+  if (event.request.method !== "GET") return;
 
-  const accept = event.request.headers.get('Accept') || '';
-  const isNavigate = event.request.mode === 'navigate' || accept.indexOf('text/html') !== -1;
-
-  if (isNavigate) {
-    // 页面导航：网络优先，绝不拿缓存挡在前面；只有断网才回退缓存首页
-    event.respondWith(
-      fetch(event.request).then((response) => {
-        if (response && response.status === 200) {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((c) => c.put('./index.html', clone));
-        }
-        return response;
-      }).catch(() => caches.match('./index.html'))
-    );
-    return;
-  }
-
-  // 其它 GET 资源：网络优先，失败回缓存（断网时图标等仍可用）
   event.respondWith(
-    fetch(event.request).then((response) => {
-      if (response && response.status === 200) {
-        const clone = response.clone();
-        caches.open(CACHE_NAME).then((c) => c.put(event.request, clone));
-      }
-      return response;
-    }).catch(() => caches.match(event.request))
+    caches.match(event.request).then((cached) => {
+      // 有缓存直接返回
+      if (cached) return cached;
+
+      // 无缓存则请求网络，并缓存副本
+      return fetch(event.request)
+        .then((response) => {
+          if (!response || response.status !== 200) return response;
+          const clone = response.clone();
+          caches.open(CACHE_NAME).then((cache) => {
+            cache.put(event.request, clone);
+          });
+          return response;
+        })
+        .catch(() => {
+          // 网络失败，返回离线页面（对于 HTML 请求返回首页）
+          if (event.request.headers.get("Accept")?.includes("text/html")) {
+            return caches.match("./index.html");
+          }
+          return new Response("离线状态，请联网后重试", { status: 503 });
+        });
+    })
   );
 });
