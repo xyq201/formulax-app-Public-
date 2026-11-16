@@ -1,61 +1,66 @@
-const CACHE_NAME = "formulax-v1";
+/* FormulaX sw.js — v10.24 跨域放行版
+ * v10.21 版的问题：fetch 拦截对页面发出的所有 GET（包括跨域的主机同步
+ * http://192.168.x.x:5002、AI 接口等）都做了 respondWith，而 SW 内部
+ * 再发内网 http 请求会被安全层处理失败，导致主机同步报 HTTP 503。
+ * 修复原则：SW 只管本站资源的离线兜底，跨域请求一律放行（不拦截、不缓存），
+ * 交给浏览器原生网络栈 —— 主机同步、AI 接口等行为与"无 SW"时完全一致。
+ */
+var CACHE_NAME = 'formulax-v1024';
 
-// 需要预缓存的核心文件
-const PRECACHE_URLS = ["./", "./index.html", "./manifest.json"];
-
-// 安装：预缓存核心文件
-self.addEventListener("install", (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      console.log("[SW] 预缓存核心文件");
-      return cache.addAll(PRECACHE_URLS);
-    })
-  );
-  // 立即激活，不等待旧 SW
+self.addEventListener('install', function (event) {
+  // 不预缓存任何东西，安装即生效
   self.skipWaiting();
 });
 
-// 激活：清理旧缓存
-self.addEventListener("activate", (event) => {
+self.addEventListener('activate', function (event) {
   event.waitUntil(
-    caches
-      .keys()
-      .then((names) =>
-        Promise.all(
-          names.filter((n) => n !== CACHE_NAME).map((n) => caches.delete(n))
-        )
-      )
+    caches.keys().then(function (names) {
+      return Promise.all(
+        names.filter(function (n) { return n !== CACHE_NAME; })
+             .map(function (n) { return caches.delete(n); })
+      );
+    })
   );
   self.clients.claim();
 });
 
-// 请求拦截：缓存优先，网络回退
-self.addEventListener("fetch", (event) => {
-  // 跳过非 GET 请求
-  if (event.request.method !== "GET") return;
+self.addEventListener('fetch', function (event) {
+  var req = event.request;
+  if (req.method !== 'GET') return;
 
+  // ★ 关键修复：跨域请求一律放行，绝不 respondWith
+  //   （主机同步 http://192.168.x.x、AI 接口等不经过 SW）
+  try {
+    if (new URL(req.url).origin !== self.location.origin) return;
+  } catch (e) { return; }
+
+  // 以下只处理本站请求
+  var accept = '';
+  try { accept = req.headers.get('Accept') || ''; } catch (e2) {}
+  var isNavigate = req.mode === 'navigate' || accept.indexOf('text/html') !== -1;
+
+  if (isNavigate) {
+    // 页面导航：网络优先，绝不拿缓存挡在前面；只有断网才回退缓存首页
+    event.respondWith(
+      fetch(req).then(function (resp) {
+        if (resp && resp.status === 200) {
+          var cl = resp.clone();
+          caches.open(CACHE_NAME).then(function (c) { c.put('./index.html', cl); });
+        }
+        return resp;
+      }).catch(function () { return caches.match('./index.html'); })
+    );
+    return;
+  }
+
+  // 其它本站 GET 资源：网络优先，失败回缓存（断网时图标等仍可用）
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      // 有缓存直接返回
-      if (cached) return cached;
-
-      // 无缓存则请求网络，并缓存副本
-      return fetch(event.request)
-        .then((response) => {
-          if (!response || response.status !== 200) return response;
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => {
-            cache.put(event.request, clone);
-          });
-          return response;
-        })
-        .catch(() => {
-          // 网络失败，返回离线页面（对于 HTML 请求返回首页）
-          if (event.request.headers.get("Accept")?.includes("text/html")) {
-            return caches.match("./index.html");
-          }
-          return new Response("离线状态，请联网后重试", { status: 503 });
-        });
-    })
+    fetch(req).then(function (resp) {
+      if (resp && resp.status === 200) {
+        var cl = resp.clone();
+        caches.open(CACHE_NAME).then(function (c) { c.put(req, cl); });
+      }
+      return resp;
+    }).catch(function () { return caches.match(req); })
   );
 });
